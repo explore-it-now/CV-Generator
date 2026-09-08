@@ -1,0 +1,6 @@
+{
+  "name": "CV Optimizer",
+  "description": "An AI-powered CV optimization tool that helps you tailor your resume to specific job descriptions.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
