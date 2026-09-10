@@ -1,5 +1,5 @@
 import express from "express";
-import db from "../lib/db.ts";
+import db from "../lib/db.js";
 import { GoogleGenAI } from "@google/genai";
 
 let geminiClient: GoogleGenAI | null = null;
