@@ -847,6 +847,14 @@ export default function CVOptimizer() {
     }
   };
   const [loadingMsg, setLoadingMsg] = useState("");
+  const [streamingText, setStreamingText] = useState("");
+  const [genProgress, setGenProgress] = useState(0);
+  const streamingPreviewRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (streamingPreviewRef.current) {
+      streamingPreviewRef.current.scrollTop = streamingPreviewRef.current.scrollHeight;
+    }
+  }, [streamingText]);
   const [copied, setCopied] = useState(false);
   const [showModal, setShowModal] = useState(false);
   const [modalCopied, setModalCopied] = useState(false);
@@ -1460,8 +1468,10 @@ Qualifications:
     if (!apiKeyReady) {
       await handleOpenKeySelector();
     }
-    setLoading(true); 
+    setLoading(true);
     setResult(null);
+    setStreamingText("");
+    setGenProgress(0);
     try {
       const systemInstruction = mode === "generate"
         ? "You are an elite CV writer. Create a compelling, ATS-optimized CV from the job description. ABSOLUTELY ENSURE all grammar and spelling are 100% correct. Use EXACTLY these section headers: Professional Summary, Employment History/Experience, Core Skills, Key Achievements, Education, Certifications. In the Core Skills section, provide a concise list of quick words/keywords only, do not use long descriptions. In the Employment History/Experience section, list each role with its title, company, and dates, followed by a list of responsibilities and achievements using bullet points (•). If responsibilities are not provided for a role, use your knowledge to generate relevant, achievement-oriented bullet points based on the job title and the job description. Ensure each section is clearly separated by a blank line. Punchy and achievement-focused. Do not use markdown blocks like ```, just return the raw text formatted nicely."
@@ -1518,7 +1528,16 @@ ${otherInfo || "Not specified"}
         ? `Create a professional CV for this role. Use the personal details and professional background provided. Do not hallucinate experience that isn't mentioned in the background, but phrase the existing experience to match the job description perfectly.\n\n${personalBlock}\nJOB DESCRIPTION:\n${jobDesc}`
         : `Optimize this CV for the job description. Maintain the user's core experience but rephrase for maximum impact and ATS alignment.\n\nCV:\n${uploadedCVContent || existingCV}\n\nJOB DESCRIPTION:\n${jobDesc}`;
 
-      const generatedText = await generateCV(content, systemInstruction);
+      const generatedText = await generateCV(content, systemInstruction, (accumulated) => {
+        setStreamingText(accumulated);
+        // Real progress: only advances as actual text arrives from the model,
+        // estimated against a typical full-CV length. Capped below 100 until
+        // the stream actually finishes.
+        const estimatedTotal = 1800;
+        setGenProgress(Math.min(96, 12 + (accumulated.length / estimatedTotal) * 84));
+      });
+      setGenProgress(100);
+      await new Promise(r => setTimeout(r, 400));
       setResult(generatedText);
       setOriginalResult(generatedText);
       setCvSections(parseSections(generatedText));
@@ -1539,18 +1558,22 @@ ${otherInfo || "Not specified"}
       }
 
       setStep(3);
-    } catch (err) { 
+    } catch (err) {
       console.error("CV Generation Error:", err);
       const errMsg = err instanceof Error ? err.message : String(err);
+      setResult(null);
+      setStreamingText("");
+      setGenProgress(0);
       if (errMsg.includes("API key not valid") || errMsg.includes("Requested entity was not found")) {
         setApiKeyReady(false);
-        setResult("Gemini API key is invalid or missing. Please connect your API key.");
+        showToast("Gemini API key is invalid or missing. Please connect your API key.", "error");
       } else {
-        setResult(`Generation failed: ${errMsg}`); 
+        showToast(`Generation failed: ${errMsg}`, "error");
       }
-      setStep(3); 
-    } finally { 
-      setLoading(false); 
+      // Stay on this step so the user can just retry — don't show the error
+      // as if it were the generated CV.
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -2892,7 +2915,29 @@ ${otherInfo || "Not specified"}
                   <div className="text-center py-8 mb-6 relative">
                     <div className="absolute inset-0 bg-blue-500/10 blur-xl rounded-full" />
                     <div className="w-12 h-12 border-4 border-slate-200/50 dark:border-white/10 border-t-blue-500 rounded-full mx-auto mb-4 animate-spin relative z-10 shadow-lg shadow-blue-500/20" />
-                    <div className="font-mono text-xs text-blue-600 dark:text-blue-400 animate-pulse tracking-widest font-bold relative z-10 uppercase typing-dots">{loadingMsg}</div>
+                    <div className="font-mono text-xs text-blue-600 dark:text-blue-400 animate-pulse tracking-widest font-bold relative z-10 uppercase typing-dots mb-5">
+                      {streamingText ? "Writing your CV" : loadingMsg}
+                    </div>
+
+                    <div className="max-w-md mx-auto relative z-10">
+                      <div className="h-2 bg-slate-200/70 dark:bg-slate-800 rounded-full overflow-hidden shadow-inner">
+                        <div
+                          className="h-full bg-gradient-to-r from-blue-600 to-cyan-500 rounded-full transition-[width] duration-300 ease-out"
+                          style={{ width: `${genProgress}%` }}
+                        />
+                      </div>
+                      <div className="text-[10px] font-mono text-slate-400 dark:text-slate-500 mt-2 tracking-widest">{Math.round(genProgress)}%</div>
+                    </div>
+
+                    {streamingText && (
+                      <div
+                        ref={streamingPreviewRef}
+                        className="max-w-md mx-auto mt-5 h-32 overflow-y-auto text-left bg-white/70 dark:bg-slate-900/60 border border-slate-200/50 dark:border-white/10 rounded-2xl p-4 text-[11px] font-mono text-slate-600 dark:text-slate-300 leading-relaxed shadow-inner relative z-10 whitespace-pre-wrap"
+                      >
+                        {streamingText}
+                        <span className="inline-block w-1.5 h-3 bg-blue-500 ml-0.5 align-middle animate-pulse" />
+                      </div>
+                    )}
                   </div>
                 )}
 

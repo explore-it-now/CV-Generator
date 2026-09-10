@@ -22,10 +22,42 @@ export const extractTextFromPDF = async (base64: string, mimeType: string): Prom
   return data.text;
 };
 
-export const generateCV = async (content: string, systemInstruction: string): Promise<string> => {
-  const data = await postJson<{ text?: string }>("/api/generate-cv", { content, systemInstruction });
-  if (!data.text) throw new Error("The AI did not return any content. Please try again.");
-  return data.text.replace(/^```[\w]*\n/gm, '').replace(/```$/gm, '');
+// Streams the generated CV as it's written, calling onChunk with the
+// accumulated text so far after each piece arrives — this is what powers the
+// real (not simulated) progress feedback during generation.
+export const generateCV = async (
+  content: string,
+  systemInstruction: string,
+  onChunk?: (accumulatedText: string) => void
+): Promise<string> => {
+  const res = await fetch("/api/generate-cv", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content, systemInstruction })
+  });
+
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.error || `Generation request failed (${res.status})`);
+  }
+  if (!res.body) {
+    // Fallback for environments without streaming body support
+    const text = await res.text();
+    if (!text) throw new Error("The AI did not return any content. Please try again.");
+    return text.replace(/^```[\w]*\n/gm, '').replace(/```$/gm, '');
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let full = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    full += decoder.decode(value, { stream: true });
+    onChunk?.(full);
+  }
+  if (!full) throw new Error("The AI did not return any content. Please try again.");
+  return full.replace(/^```[\w]*\n/gm, '').replace(/```$/gm, '');
 };
 
 export const extractFromUrl = async (url: string): Promise<string> => {

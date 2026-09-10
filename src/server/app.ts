@@ -12,6 +12,42 @@ function getGemini(): GoogleGenAI | null {
   return geminiClient;
 }
 
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Gemini's SDK throws errors whose .message is a raw JSON blob like
+// {"error":{"code":503,"message":"...","status":"UNAVAILABLE"}}. This pulls
+// out just the human-readable message so the UI never shows raw JSON.
+function cleanGeminiError(err: any): string {
+  const raw = err?.message || String(err);
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed?.error?.message) return parsed.error.message;
+  } catch {}
+  return raw;
+}
+
+function isTransientGeminiError(err: any): boolean {
+  const raw = String(err?.message || err);
+  return /"code":\s*503|"code":\s*429|UNAVAILABLE|RESOURCE_EXHAUSTED|overloaded|high demand/i.test(raw);
+}
+
+// Retries a Gemini call a couple of times, with a short backoff, only for
+// transient "model overloaded" style errors — not for real failures like an
+// invalid API key or a malformed request.
+async function withRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
+  let lastErr: any;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (!isTransientGeminiError(err) || i === attempts - 1) throw err;
+      await sleep(600 * Math.pow(2, i)); // 600ms, 1200ms, ...
+    }
+  }
+  throw lastErr;
+}
+
 export function createApiApp() {
   const app = express();
 
@@ -48,26 +84,51 @@ export function createApiApp() {
     }
   });
 
-  // Generate CV endpoint
+  // Generate CV endpoint — streams plain text chunks as they arrive so the UI
+  // can show real progress instead of a blind wait. Retries transient
+  // "model overloaded" errors before the first byte is sent; once streaming
+  // has started we can no longer safely retry, so a mid-stream failure just
+  // ends the response with whatever text arrived.
   app.post("/api/generate-cv", async (req, res) => {
     const { content, systemInstruction } = req.body;
-    try {
-      const ai = getGemini();
-      if (!ai) {
-        return res.status(503).json({ error: "Gemini API key not configured on server" });
-      }
-      const response = await ai.models.generateContent({
-        model: "gemini-3.8-flash",
-        contents: [{ parts: [{ text: content }] }],
-        config: {
-          systemInstruction,
-          temperature: 0.7,
+    const ai = getGemini();
+    if (!ai) {
+      return res.status(503).json({ error: "Gemini API key not configured on server" });
+    }
+
+    let attempt = 0;
+    const maxAttempts = 3;
+    while (attempt < maxAttempts) {
+      attempt++;
+      try {
+        const stream = await ai.models.generateContentStream({
+          model: "gemini-3.8-flash",
+          contents: [{ parts: [{ text: content }] }],
+          config: { systemInstruction, temperature: 0.7 }
+        });
+
+        res.setHeader("Content-Type", "text/plain; charset=utf-8");
+        res.setHeader("Cache-Control", "no-cache");
+        for await (const chunk of stream) {
+          const t = chunk.text;
+          if (t) res.write(t);
         }
-      });
-      res.json({ text: response.text || "" });
-    } catch (err: any) {
-      console.error("Server generate-cv error:", err?.message || err);
-      res.status(500).json({ error: err?.message || "Generation error" });
+        res.end();
+        return;
+      } catch (err: any) {
+        console.error(`Server generate-cv error (attempt ${attempt}):`, err?.message || err);
+        if (res.headersSent) {
+          // Already streaming to the client — can't retry cleanly, just stop.
+          res.end();
+          return;
+        }
+        if (isTransientGeminiError(err) && attempt < maxAttempts) {
+          await sleep(600 * Math.pow(2, attempt - 1));
+          continue;
+        }
+        res.status(503).json({ error: cleanGeminiError(err) });
+        return;
+      }
     }
   });
 
@@ -79,7 +140,7 @@ export function createApiApp() {
       if (!ai) {
         return res.status(503).json({ error: "Gemini API key not configured on server" });
       }
-      const response = await ai.models.generateContent({
+      const response = await withRetry(() => ai.models.generateContent({
         model: "gemini-3.8-flash",
         contents: [{ parts: [{ text: `You are a strict, realistic ATS (Applicant Tracking System) analyzer. Give an honest assessment — do not inflate the score to be encouraging. A CV that is a poor match for the job description MUST score low (below 50). A CV with no real overlap in role, skills, or seniority should score below 30.
 Compare the following CV against the provided Job Description.
@@ -103,12 +164,12 @@ ${jobDescription}` }] }],
         config: {
           responseMimeType: "application/json"
         }
-      });
+      }));
       const parsed = JSON.parse(response.text || "{}");
       res.json(parsed);
     } catch (err: any) {
       console.error("Server ats-score error:", err?.message || err);
-      res.status(500).json({ error: err?.message || "ATS analysis error" });
+      res.status(503).json({ error: cleanGeminiError(err) });
     }
   });
 
@@ -120,16 +181,16 @@ ${jobDescription}` }] }],
       if (!ai) {
         return res.status(503).json({ error: "Gemini API key not configured on server" });
       }
-      const response = await ai.models.generateContent({
+      const response = await withRetry(() => ai.models.generateContent({
         model: "gemini-3.8-flash",
         contents: [{ parts: [{ text: `Parse this CV text into a JSON object with these fields: name, email, phone, country, city, linkedin, portfolio, background (a career summary), achievements (array of strings or a single string), skills (array of strings), educations (array of {degree, university}), workExperiences (array of {company, title, startDate, endDate, current, responsibilities (string with bullet points or paragraphs)}), certificates (array of strings), courses (array of strings). Only include information actually present in the text — leave a field empty or omit it rather than inventing data. Ensure all extracted text has perfect grammar and spelling. Return ONLY the JSON object.\n\nCV TEXT:\n${text}` }] }],
         config: { responseMimeType: "application/json" }
-      });
+      }));
       const parsed = JSON.parse(response.text || "{}");
       res.json({ profile: parsed });
     } catch (err: any) {
       console.error("Server parse-cv error:", err?.message || err);
-      res.status(500).json({ error: err?.message || "CV parsing error" });
+      res.status(503).json({ error: cleanGeminiError(err) });
     }
   });
 
@@ -141,7 +202,7 @@ ${jobDescription}` }] }],
       if (!ai) {
         return res.status(503).json({ error: "Gemini API key not configured on server" });
       }
-      const response = await ai.models.generateContent({
+      const response = await withRetry(() => ai.models.generateContent({
         model: "gemini-3.8-flash",
         contents: [{
           parts: [
@@ -149,11 +210,11 @@ ${jobDescription}` }] }],
             { text: "Extract all text from this document. Return only the extracted text, no commentary or markdown formatting." }
           ]
         }]
-      });
+      }));
       res.json({ text: response.text || "" });
     } catch (err: any) {
       console.error("Server extract-pdf error:", err?.message || err);
-      res.status(500).json({ error: err?.message || "PDF extraction error" });
+      res.status(503).json({ error: cleanGeminiError(err) });
     }
   });
 
@@ -165,17 +226,17 @@ ${jobDescription}` }] }],
       if (!ai) {
         return res.status(503).json({ error: "Gemini API key not configured on server" });
       }
-      const response = await ai.models.generateContent({
+      const response = await withRetry(() => ai.models.generateContent({
         model: "gemini-3.8-flash",
         contents: `Extract the job title, company name, and full job description (responsibilities, requirements, skills) from this URL: ${url}. If the page cannot be accessed or does not contain a job posting, say so plainly instead of inventing content.`,
         config: {
           tools: [{ urlContext: {} }]
         }
-      });
+      }));
       res.json({ text: response.text || "" });
     } catch (err: any) {
       console.error("Server extract-url error:", err?.message || err);
-      res.status(500).json({ error: err?.message || "URL extraction error" });
+      res.status(503).json({ error: cleanGeminiError(err) });
     }
   });
 
@@ -187,19 +248,19 @@ ${jobDescription}` }] }],
       if (!ai) {
         return res.status(503).json({ error: "Gemini API key not configured on server" });
       }
-      const response = await ai.models.generateContent({
+      const response = await withRetry(() => ai.models.generateContent({
         model: "gemini-3.8-flash",
         contents: `Extract all professional information from this LinkedIn profile URL: ${url}. Parse it into a JSON object with these fields: name, email, phone, country, city, linkedin, portfolio, background (a career summary), achievements (array of strings), skills (array of strings), educations (array of {degree, university}), workExperiences (array of {company, title, startDate, endDate, current, responsibilities (string with bullet points or paragraphs)}), certificates (array of strings), courses (array of strings). Only include information actually present on the page — leave fields empty rather than inventing data. Return ONLY the JSON object, no markdown blocks.`,
         config: {
           tools: [{ urlContext: {} }],
           responseMimeType: "application/json"
         }
-      });
+      }));
       const parsed = JSON.parse(response.text || "{}");
       res.json({ profile: parsed });
     } catch (err: any) {
       console.error("Server extract-profile error:", err?.message || err);
-      res.status(500).json({ error: err?.message || "Profile extraction error" });
+      res.status(503).json({ error: cleanGeminiError(err) });
     }
   });
 
