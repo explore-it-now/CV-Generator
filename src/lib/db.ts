@@ -1,7 +1,9 @@
 import Database from 'better-sqlite3';
 import path from 'path';
 
-const dbPath = path.resolve(process.cwd(), 'cv_optimizer.db');
+const dbPath = process.env.VERCEL
+  ? path.join('/tmp', 'cv_optimizer.db')
+  : path.resolve(process.cwd(), 'cv_optimizer.db');
 
 const db = new Database(dbPath);
 
