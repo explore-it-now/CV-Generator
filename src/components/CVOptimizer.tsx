@@ -1,5 +1,5 @@
 import ParticleBackground from './ParticleBackground';
-import { useState, useEffect, useRef, ChangeEvent, forwardRef, Fragment } from "react";
+import { useState, useEffect, useRef, ChangeEvent, DragEvent, forwardRef, Fragment } from "react";
 import * as mammoth from "mammoth";
 import { motion, AnimatePresence, Reorder, useDragControls } from "motion/react";
 import { 
@@ -17,10 +17,8 @@ import { Document, Packer, Paragraph, TextRun, AlignmentType, BorderStyle, Headi
 import jsPDF from "jspdf";
 import html2canvas from "html2canvas-pro";
 import { PricingModal, UserAccess } from "./PricingModal";
-import { extractTextFromPDF, generateCV, extractFromUrl, extractProfileFromUrl, analyzeAtsCompatibility } from "../services/geminiService";
+import { extractTextFromPDF, generateCV, extractFromUrl, extractProfileFromUrl, analyzeAtsCompatibility, parseCV } from "../services/geminiService";
 import { extractTextFromPDFLocally } from "../lib/pdfParser";
-import { Type } from "@google/genai";
-import { GoogleGenAI } from "@google/genai";
 
 const TEMPLATES = {
   modern:    { name: "Modern",    hint: "Clean lines, professional sidebar", color: "text-blue-600", border: "border-blue-600", bg: "bg-blue-50" },
@@ -802,9 +800,12 @@ export default function CVOptimizer() {
   const [jobFileLoading, setJobFileLoading] = useState(false);
   const [jobFileError, setJobFileError] = useState("");
   const [jobFile, setJobFile] = useState<File | null>(null);
+  const [isDraggingJobFile, setIsDraggingJobFile] = useState(false);
   const [existingCV, setExistingCV] = useState("");
   const [uploadedCVContent, setUploadedCVContent] = useState("");
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
+  const [isDraggingCVFile, setIsDraggingCVFile] = useState(false);
+  const [isDraggingMagicFill, setIsDraggingMagicFill] = useState(false);
   const [fileLoading, setFileLoading] = useState(false);
   const [fileError, setFileError] = useState("");
   const [result, setResult] = useState<string | null>(null);
@@ -873,6 +874,7 @@ export default function CVOptimizer() {
   };
   const [atsScore, setAtsScore] = useState<number | null>(null);
   const [atsTips, setAtsTips] = useState<string[]>([]);
+  const [atsError, setAtsError] = useState<string | null>(null);
   const [isAnalyzingAts, setIsAnalyzingAts] = useState(false);
   const [showAtsModal, setShowAtsModal] = useState(false);
   const [activeTab, setActiveTab] = useState<'edit' | 'preview'>('edit');
@@ -1132,6 +1134,25 @@ Qualifications:
     return () => clearInterval(iv);
   }, [loading]);
 
+  // Builds onDragEnter/Over/Leave/Drop handlers that feed a dropped file into an
+  // existing file-input handler, so drag-and-drop and click-to-browse share one code path.
+  const makeDropHandlers = (
+    setDragging: (v: boolean) => void,
+    onFile: (e: ChangeEvent<HTMLInputElement>) => void
+  ) => ({
+    onDragEnter: (e: DragEvent<HTMLElement>) => { e.preventDefault(); e.stopPropagation(); setDragging(true); },
+    onDragOver: (e: DragEvent<HTMLElement>) => { e.preventDefault(); e.stopPropagation(); setDragging(true); },
+    onDragLeave: (e: DragEvent<HTMLElement>) => { e.preventDefault(); e.stopPropagation(); setDragging(false); },
+    onDrop: (e: DragEvent<HTMLElement>) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setDragging(false);
+      const file = e.dataTransfer.files?.[0];
+      if (!file) return;
+      onFile({ target: { files: e.dataTransfer.files } } as unknown as ChangeEvent<HTMLInputElement>);
+    }
+  });
+
   const handleFile = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -1233,38 +1254,8 @@ Qualifications:
 
       if (!text.trim()) throw new Error("Could not extract text from file.");
 
-      // Use AI or smart extraction to parse the text into fields
-      let parsed: any = null;
-      try {
-        const apiKey = (typeof process !== "undefined" && process.env?.GEMINI_API_KEY) ||
-                       (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_GEMINI_API_KEY);
-        if (apiKey) {
-          const ai = new GoogleGenAI({ apiKey });
-          const response = await ai.models.generateContent({
-            model: "gemini-3.8-flash",
-            contents: [{ parts: [{ text: `Parse this CV text into a JSON object with these fields: name, email, phone, country, city, linkedin, portfolio, background (a career summary), achievements (array of strings or a single string), skills (array of strings), educations (array of {degree, university}), workExperiences (array of {company, title, startDate, endDate, current, responsibilities (string with bullet points or paragraphs)}), certificates (array of strings), courses (array of strings). Ensure all extracted and generated text has perfect grammar and spelling. Return ONLY the JSON object.\n\nCV TEXT:\n${text}` }] }],
-            config: { responseMimeType: "application/json" }
-          });
-          parsed = JSON.parse(response.text || "{}");
-        }
-      } catch (e) {
-        console.warn("AI parse error, falling back to regex extraction", e);
-      }
+      const parsed: any = await parseCV(text);
 
-      if (!parsed || !parsed.name) {
-        const nameMatch = text.match(/^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)/m);
-        const emailMatch = text.match(/[\w.-]+@[\w.-]+\.\w+/);
-        const phoneMatch = text.match(/(\+?\d[\d\s-().]{8,}\d)/);
-        const skillsMatch = text.match(/skills?[:\s]+([^\n\r]+)/i);
-        parsed = {
-          name: nameMatch ? nameMatch[1] : (details.name || "Alex Morgan"),
-          email: emailMatch ? emailMatch[0] : (details.email || "alex.morgan@email.com"),
-          phone: phoneMatch ? phoneMatch[0] : (details.phone || "+1 (555) 234-5678"),
-          background: text.slice(0, 300).trim(),
-          skills: skillsMatch ? skillsMatch[1].split(/[,|•]/).map(s => s.trim()).filter(Boolean) : undefined
-        };
-      }
-      
       if (parsed.name) setDetails(d => ({ ...d, name: parsed.name }));
       if (parsed.email) setDetails(d => ({ ...d, email: parsed.email }));
       if (parsed.phone) setDetails(d => ({ ...d, phone: parsed.phone }));
@@ -1289,7 +1280,8 @@ Qualifications:
 
     } catch (err) {
       console.error("Magic Fill Error:", err);
-      showToast("Could not read CV file. Please try pasting text directly.", "error");
+      const errMsg = err instanceof Error ? err.message : String(err);
+      showToast(`Magic fill failed: ${errMsg}. Please try pasting the text manually.`, "error");
     } finally {
       setIsParsingCV(false);
     }
@@ -1344,8 +1336,8 @@ Qualifications:
       showToast("LinkedIn profile imported successfully!", "success");
     } catch (err: any) {
       console.error(err);
-      showToast("LinkedIn import was not accessible. Loaded sample candidate profile.", "info");
-      loadSampleData();
+      const errMsg = err instanceof Error ? err.message : String(err);
+      showToast(`Could not import that LinkedIn profile: ${errMsg}. Please enter your details manually.`, "error");
     } finally {
       setIsParsingLinkedIn(false);
     }
@@ -1358,18 +1350,17 @@ Qualifications:
     
     setIsAnalyzingAts(true);
     setShowAtsModal(true);
+    setAtsError(null);
+    setAtsScore(null);
+    setAtsTips([]);
     try {
       const { score, tips } = await analyzeAtsCompatibility(result, jobDesc);
       setAtsScore(score);
       setAtsTips(tips);
     } catch (err) {
       console.error("ATS Analysis failed", err);
-      setAtsScore(88);
-      setAtsTips([
-        "Strong overall keyword alignment and role-specific phrase matching.",
-        "Include more quantified business outcomes in your most recent position.",
-        "Ensure technical tools mentioned in the job description are prominent in your skills list."
-      ]);
+      const errMsg = err instanceof Error ? err.message : String(err);
+      setAtsError(errMsg);
     } finally {
       setIsAnalyzingAts(false);
     }
@@ -1964,31 +1955,38 @@ ${otherInfo || "Not specified"}
           </div>
           
           <div className="flex items-center gap-4 sm:gap-10">
-            <nav className="flex items-center gap-2 p-1.5 bg-[#F5F5F5] dark:bg-slate-800/60 rounded-3xl border border-slate-200/50 dark:border-white/10 ">
+            <nav className="flex items-start gap-3 sm:gap-6 px-2 py-2 sm:px-3 sm:py-2.5 bg-[#F5F5F5] dark:bg-slate-800/60 rounded-3xl border border-slate-200/50 dark:border-white/10 ">
               {STEPS.map((s, i) => (
-                <div key={i} className="flex items-center">
-                  <button 
-                    onClick={() => { if (i < step || (i === 3 && result)) setStep(i); }}
-                    className={`relative w-9 h-9 sm:w-10 sm:h-10 rounded-3xl flex items-center justify-center text-[10px] font-bold transition-all duration-500 ${
-                      step === i 
-                        ? 'bg-gradient-to-br from-blue-600 to-cyan-600 text-white shadow-2xl shadow-blue-500/10 scale-110' 
-                        : (step > i || (i === 3 && result))
-                          ? 'bg-emerald-500 text-white cursor-pointer hover:bg-emerald-600' 
-                          : 'bg-white/80 dark:bg-slate-800/60 text-slate-400 dark:text-slate-500 border border-[#F5F5F5] dark:border-white/20 cursor-default'
-                    }`}
-                    title={s}
-                  >
-                    {(step > i || (i === 3 && result && step !== 3)) ? <Check className="w-4 h-4" /> : i + 1}
-                    {step === i && (
-                      <motion.div 
-                        layoutId="active-step-ring"
-                        className="absolute -inset-1.5 border-2 border-indigo-600/20 rounded-3xl"
-                        transition={{ type: "spring", bounce: 0.2, duration: 0.6 }}
-                      />
-                    )}
-                  </button>
+                <div key={i} className="flex items-start">
+                  <div className="flex flex-col items-center gap-1.5">
+                    <button
+                      onClick={() => { if (i < step || (i === 3 && result)) setStep(i); }}
+                      className={`relative w-9 h-9 sm:w-10 sm:h-10 rounded-3xl flex items-center justify-center text-[10px] font-bold transition-all duration-500 ${
+                        step === i
+                          ? 'bg-gradient-to-br from-blue-600 to-cyan-600 text-white shadow-2xl shadow-blue-500/10 scale-110'
+                          : (step > i || (i === 3 && result))
+                            ? 'bg-emerald-500 text-white cursor-pointer hover:bg-emerald-600'
+                            : 'bg-white/80 dark:bg-slate-800/60 text-slate-400 dark:text-slate-500 border border-[#F5F5F5] dark:border-white/20 cursor-default'
+                      }`}
+                      title={s}
+                    >
+                      {(step > i || (i === 3 && result && step !== 3)) ? <Check className="w-4 h-4" /> : i + 1}
+                      {step === i && (
+                        <motion.div
+                          layoutId="active-step-ring"
+                          className="absolute -inset-1.5 border-2 border-indigo-600/20 rounded-3xl"
+                          transition={{ type: "spring", bounce: 0.2, duration: 0.6 }}
+                        />
+                      )}
+                    </button>
+                    <span className={`hidden sm:block text-[9px] font-bold uppercase tracking-widest whitespace-nowrap transition-colors duration-500 ${
+                      step === i ? 'text-slate-900 dark:text-white' : (step > i || (i === 3 && result)) ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-400 dark:text-slate-500'
+                    }`}>
+                      {s}
+                    </span>
+                  </div>
                   {i < 3 && (
-                    <div className={`w-4 sm:w-8 h-[2px] mx-1 rounded-3xl transition-colors duration-500 ${step > i ? 'bg-emerald-500' : 'bg-slate-200 dark:bg-slate-800/60'}`} />
+                    <div className={`w-6 sm:w-10 h-[2px] mx-1.5 sm:mx-2 mt-[18px] sm:mt-5 rounded-3xl transition-colors duration-500 ${step > i ? 'bg-emerald-500' : 'bg-slate-200 dark:bg-slate-800/60'}`} />
                   )}
                 </div>
               ))}
@@ -1996,17 +1994,6 @@ ${otherInfo || "Not specified"}
             
             <div className="hidden sm:block w-px h-8 bg-slate-200 dark:bg-slate-800/60" />
             
-            <a 
-              href="/cv-generator-source.zip"
-              download="cv-generator-source.zip"
-              className="px-3.5 py-2 text-xs font-bold text-slate-700 hover:text-slate-900 dark:text-slate-200 dark:hover:text-white transition-all bg-white/80 dark:bg-slate-800/60 rounded-3xl border border-slate-200/50 dark:border-white/20 shadow-2xl hover:shadow-2xl hover:-translate-y-0.5 active:scale-95 flex items-center gap-2"
-              title="Download full project code as a ZIP archive"
-            >
-              <Download className="w-4 h-4 text-blue-500" />
-              <span className="hidden md:inline">Download Code (.ZIP)</span>
-              <span className="md:hidden">ZIP</span>
-            </a>
-
             <button 
               onClick={() => setIsDarkMode(!isDarkMode)}
               className="p-3 text-slate-500 hover:text-slate-900 dark:text-slate-100 transition-all bg-white/80 dark:bg-slate-800/60 rounded-3xl border border-slate-200/50 dark:border-white/20 shadow-2xl hover:shadow-2xl hover:-translate-y-0.5 active:scale-95"
@@ -2157,11 +2144,11 @@ ${otherInfo || "Not specified"}
                       <div className="flex-1 p-4 overflow-hidden">
                         <MiniDoc id={id} selected={template === id} />
                       </div>
-                      <div className={`h-14 flex flex-col items-center justify-center transition-colors duration-500 ${
+                      <div className={`min-h-[4.5rem] px-2 py-2 flex flex-col items-center justify-center text-center transition-colors duration-500 ${
                         template === id ? 'bg-gradient-to-br from-blue-600 to-cyan-600 text-white' : 'bg-white/80 dark:bg-slate-800/60 text-slate-500 dark:text-slate-400 group-hover:bg-blue-50 dark:group-hover:bg-indigo-900/30 group-hover:text-slate-900 dark:text-slate-100'
                       }`}>
-                        <span className="text-[10px] font-bold tracking-widest uppercase">{t.name}</span>
-                        <span className={`text-[8px] opacity-60 mt-0.5 ${template === id ? 'text-white' : 'text-slate-400'}`}>{t.hint}</span>
+                        <span className="text-[10px] font-bold tracking-widest uppercase leading-tight">{t.name}</span>
+                        <span className={`text-[8px] opacity-60 mt-0.5 leading-snug ${template === id ? 'text-white' : 'text-slate-400'}`}>{t.hint}</span>
                       </div>
                     </div>
                     
@@ -2223,12 +2210,20 @@ ${otherInfo || "Not specified"}
                     <>
                       <div className="relative w-full sm:w-auto">
                         <input type="file" id="magic-fill" className="hidden" accept=".pdf,.docx,.txt" onChange={handleMagicFill} />
-                        <label 
-                          htmlFor="magic-fill" 
-                          className={`flex items-center justify-center gap-3 px-6 py-3 rounded-3xl bg-gradient-to-br from-blue-600 to-cyan-600 text-white text-xs font-bold tracking-widest uppercase cursor-pointer hover:from-blue-500 hover:to-cyan-500 hover:shadow-blue-500/30 transition-all shadow-2xl shadow-blue-500/10 hover:-translate-y-0.5 active:scale-95 ${isParsingCV ? 'opacity-50 pointer-events-none' : ''}`}
+                        <label
+                          htmlFor="magic-fill"
+                          {...makeDropHandlers(setIsDraggingMagicFill, handleMagicFill)}
+                          title="Click to browse, or drag & drop a CV file (PDF, Word, TXT) to auto-fill this form"
+                          className={`flex items-center justify-center gap-3 px-6 py-3 rounded-3xl text-white text-xs font-bold tracking-widest uppercase cursor-pointer transition-all shadow-2xl shadow-blue-500/10 hover:-translate-y-0.5 active:scale-95 border-2 border-dashed ${
+                            isParsingCV
+                              ? 'opacity-50 pointer-events-none border-transparent bg-gradient-to-br from-blue-600 to-cyan-600'
+                              : isDraggingMagicFill
+                                ? 'border-white bg-gradient-to-br from-blue-500 to-cyan-500 scale-[1.02]'
+                                : 'border-transparent bg-gradient-to-br from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 hover:shadow-blue-500/30'
+                          }`}
                         >
                           {isParsingCV ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-                          {isParsingCV ? <span className="typing-dots">Magic Filling</span> : "Magic Fill from CV"}
+                          {isParsingCV ? <span className="typing-dots">Magic Filling</span> : isDraggingMagicFill ? "Drop to Upload" : "Magic Fill from CV"}
                         </label>
                       </div>
                       <div className="relative w-full sm:w-auto">
@@ -2720,19 +2715,24 @@ ${otherInfo || "Not specified"}
 
                     {jobInputMode === 'file' && (
                       <div className="space-y-4">
-                        <div className={`relative h-[220px] rounded-3xl border-2 border-dashed transition-all flex flex-col items-center justify-center p-6 text-center group/upload shadow-inner ${
-                          jobFileLoading 
-                            ? 'border-indigo-400 bg-blue-50/30 dark:bg-indigo-900/10' 
-                            : 'border-slate-200/50 dark:border-white/20 hover:border-indigo-400 hover:bg-blue-50/30 dark:hover:bg-indigo-900/10'
-                        }`}>
+                        <div
+                          {...makeDropHandlers(setIsDraggingJobFile, handleJobFile)}
+                          className={`relative h-[220px] rounded-3xl border-2 border-dashed transition-all flex flex-col items-center justify-center p-6 text-center group/upload shadow-inner ${
+                            isDraggingJobFile
+                              ? 'border-indigo-500 bg-blue-50/60 dark:bg-indigo-900/30 scale-[1.01]'
+                              : jobFileLoading
+                                ? 'border-indigo-400 bg-blue-50/30 dark:bg-indigo-900/10'
+                                : 'border-slate-200/50 dark:border-white/20 hover:border-indigo-400 hover:bg-blue-50/30 dark:hover:bg-indigo-900/10'
+                          }`}
+                        >
                           <input type="file" className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" accept=".pdf,.docx,.txt" onChange={handleJobFile} disabled={jobFileLoading} />
                           <div className="space-y-4">
                             <div className="w-16 h-16 rounded-3xl bg-indigo-100 dark:bg-indigo-900/30 flex items-center justify-center text-slate-900 dark:text-slate-100 mx-auto group-hover/upload:scale-110 transition-transform shadow-2xl">
                               {jobFileLoading ? <Loader2 className="w-8 h-8 animate-spin" /> : <UploadCloud className="w-8 h-8" />}
                             </div>
                             <div className="space-y-1">
-                              <p className="text-sm font-bold text-slate-900 dark:text-white">{jobFileLoading ? <span className="typing-dots">Analyzing Document</span> : 'Drop Job Description here'}</p>
-                              <p className="text-xs text-slate-500 font-mono uppercase tracking-widest">PDF · DOCX · TXT</p>
+                              <p className="text-sm font-bold text-slate-900 dark:text-white">{jobFileLoading ? <span className="typing-dots">Analyzing Document</span> : isDraggingJobFile ? 'Drop to Upload' : 'Drop Job Description here'}</p>
+                              <p className="text-xs text-slate-500 font-mono uppercase tracking-widest">Drag & drop, or click · PDF · DOCX · TXT</p>
                             </div>
                           </div>
                         </div>
@@ -2742,9 +2742,16 @@ ${otherInfo || "Not specified"}
                               <Check className="w-4 h-4" />
                             </div>
                             <div className="flex-1 min-w-0">
-                              <p className="text-[10px] font-bold text-emerald-700 dark:text-emerald-400 uppercase tracking-widest mb-1">Content Extracted Successfully</p>
+                              <p className="text-[10px] font-bold text-emerald-700 dark:text-emerald-400 uppercase tracking-widest mb-1">{jobFile ? jobFile.name : "Content Extracted Successfully"}</p>
                               <p className="text-xs text-emerald-600/80 dark:text-emerald-500/60 line-clamp-2 italic leading-relaxed">"{jobDesc}"</p>
                             </div>
+                            <button
+                              onClick={() => { setJobDesc(""); setJobFile(null); setJobFileError(""); }}
+                              className="p-2 text-emerald-600/60 hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/20 rounded-3xl transition-all shrink-0"
+                              title="Remove"
+                            >
+                              <X className="w-4 h-4" />
+                            </button>
                           </motion.div>
                         )}
                       </div>
@@ -2806,12 +2813,19 @@ ${otherInfo || "Not specified"}
                       
                       <div className="flex-1 flex flex-col min-h-[220px]">
                         {!uploadedFile ? (
-                          <label className="flex-1 flex flex-col items-center justify-center border-2 border-dashed border-indigo-200 dark:border-indigo-900/50 bg-blue-50/20 dark:bg-indigo-900/10 hover:bg-blue-50/40 dark:hover:bg-indigo-900/20 rounded-3xl p-6 cursor-pointer transition-all group/upload-cv shadow-inner">
+                          <label
+                            {...makeDropHandlers(setIsDraggingCVFile, handleFile)}
+                            className={`flex-1 flex flex-col items-center justify-center border-2 border-dashed rounded-3xl p-6 cursor-pointer transition-all group/upload-cv shadow-inner ${
+                              isDraggingCVFile
+                                ? 'border-indigo-500 bg-blue-50/60 dark:bg-indigo-900/30 scale-[1.01]'
+                                : 'border-indigo-200 dark:border-indigo-900/50 bg-blue-50/20 dark:bg-indigo-900/10 hover:bg-blue-50/40 dark:hover:bg-indigo-900/20'
+                            }`}
+                          >
                             <div className="w-16 h-16 rounded-3xl bg-indigo-100 dark:bg-indigo-900/30 flex items-center justify-center mb-4 group-hover/upload-cv:scale-110 transition-transform shadow-2xl">
                               <UploadCloud className="w-8 h-8 text-slate-500 dark:text-slate-400" />
                             </div>
-                            <div className="text-sm text-slate-900 dark:text-white mb-1 font-bold">Upload Existing CV</div>
-                            <div className="text-[10px] text-slate-400 font-mono uppercase tracking-widest">PDF · Word · TXT</div>
+                            <div className="text-sm text-slate-900 dark:text-white mb-1 font-bold">{isDraggingCVFile ? "Drop to Upload" : "Upload Existing CV"}</div>
+                            <div className="text-[10px] text-slate-400 font-mono uppercase tracking-widest">Drag & drop, or click · PDF · Word · TXT</div>
                             <input type="file" accept=".pdf,.docx,.txt" onChange={handleFile} ref={fileRef} className="hidden" />
                           </label>
                         ) : (
@@ -3033,7 +3047,7 @@ ${otherInfo || "Not specified"}
                       </button>
                       {!userAccess?.isPaid ? (
                         <div className="text-center text-[10px] font-medium text-slate-500 dark:text-slate-400">
-                          From $3.99 single / $9.99 mo
+                          From $0.89 single / $9.99 mo
                         </div>
                       ) : (
                         <div className="text-center text-[10px] font-semibold text-emerald-600 dark:text-emerald-400 flex items-center justify-center gap-1">
@@ -3410,6 +3424,28 @@ ${otherInfo || "Not specified"}
                   </div>
                   <h3 className="text-xl font-display font-bold text-slate-900 dark:text-white mb-2 tracking-tight">Analyzing ATS Match</h3>
                   <p className="text-sm text-slate-500 dark:text-slate-400 font-medium animate-pulse">Running your CV through our virtual tracking system...</p>
+                </div>
+              ) : atsError ? (
+                <div className="flex flex-col items-center justify-center py-12 text-center">
+                  <div className="w-16 h-16 mb-6 rounded-3xl bg-rose-50 dark:bg-rose-500/10 flex items-center justify-center text-rose-500">
+                    <X className="w-8 h-8" />
+                  </div>
+                  <h3 className="text-xl font-display font-bold text-slate-900 dark:text-white mb-2 tracking-tight">Analysis Failed</h3>
+                  <p className="text-sm text-slate-500 dark:text-slate-400 font-medium max-w-sm mb-8">{atsError}</p>
+                  <div className="flex gap-3 w-full max-w-xs">
+                    <button
+                      onClick={() => setShowAtsModal(false)}
+                      className="flex-1 py-3 rounded-3xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-bold tracking-widest text-[10px] uppercase hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
+                    >
+                      Close
+                    </button>
+                    <button
+                      onClick={handleAtsAnalysis}
+                      className="flex-1 py-3 rounded-3xl bg-slate-900 dark:bg-white text-white dark:text-slate-900 font-bold tracking-widest text-[10px] uppercase hover:bg-slate-800 dark:hover:bg-slate-100 transition-colors"
+                    >
+                      Retry
+                    </button>
+                  </div>
                 </div>
               ) : (
                 <div className="flex flex-col max-h-[80vh] overflow-y-auto custom-scrollbar pr-2">

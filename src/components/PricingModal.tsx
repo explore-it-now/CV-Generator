@@ -219,7 +219,7 @@ export const PricingModal: React.FC<PricingModalProps> = ({
                   </div>
 
                   <div className="flex items-baseline gap-1 mb-1">
-                    <span className="text-3xl font-black text-slate-900 dark:text-white">$3.99</span>
+                    <span className="text-3xl font-black text-slate-900 dark:text-white">$0.89</span>
                     <span className="text-xs text-slate-500 dark:text-slate-400 font-medium">one-time</span>
                   </div>
                   <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed mb-4">
@@ -507,7 +507,7 @@ export const PricingModal: React.FC<PricingModalProps> = ({
                 <>
                   <Lock className="w-4 h-4" />
                   <span>
-                    Pay {selectedPlan === "single" ? "$3.99" : "$9.99/mo"} & Unlock Download
+                    Pay {selectedPlan === "single" ? "$0.89" : "$9.99/mo"} & Unlock Download
                   </span>
                   <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
                 </>
