@@ -31,18 +31,27 @@ function isTransientGeminiError(err: any): boolean {
   return /"code":\s*503|"code":\s*429|UNAVAILABLE|RESOURCE_EXHAUSTED|overloaded|high demand/i.test(raw);
 }
 
-// Retries a Gemini call a couple of times, with a short backoff, only for
-// transient "model overloaded" style errors — not for real failures like an
-// invalid API key or a malformed request.
-async function withRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
+// The Vercel function has a hard maxDuration; leave a safety margin so our
+// own clean error always gets a chance to send before Vercel force-kills the
+// function and the user sees a bare, unhelpful platform timeout instead.
+const REQUEST_DEADLINE_MS = 50_000;
+
+// Retries a Gemini call for transient "model overloaded" style errors — not
+// for real failures like an invalid API key or a malformed request. Stops
+// retrying (rather than blindly trying again) once there's no longer enough
+// time left in the request's budget for another attempt.
+async function withRetry<T>(fn: () => Promise<T>, deadline: number, attempts = 3): Promise<T> {
   let lastErr: any;
   for (let i = 0; i < attempts; i++) {
     try {
       return await fn();
     } catch (err) {
       lastErr = err;
-      if (!isTransientGeminiError(err) || i === attempts - 1) throw err;
-      await sleep(600 * Math.pow(2, i)); // 600ms, 1200ms, ...
+      const backoff = 500 * Math.pow(2, i); // 500ms, 1000ms, ...
+      if (!isTransientGeminiError(err) || i === attempts - 1 || Date.now() + backoff > deadline) {
+        throw err;
+      }
+      await sleep(backoff);
     }
   }
   throw lastErr;
@@ -96,6 +105,7 @@ export function createApiApp() {
       return res.status(503).json({ error: "Gemini API key not configured on server" });
     }
 
+    const deadline = Date.now() + REQUEST_DEADLINE_MS;
     let attempt = 0;
     const maxAttempts = 3;
     while (attempt < maxAttempts) {
@@ -122,8 +132,9 @@ export function createApiApp() {
           res.end();
           return;
         }
-        if (isTransientGeminiError(err) && attempt < maxAttempts) {
-          await sleep(600 * Math.pow(2, attempt - 1));
+        const backoff = 500 * Math.pow(2, attempt - 1);
+        if (isTransientGeminiError(err) && attempt < maxAttempts && Date.now() + backoff < deadline) {
+          await sleep(backoff);
           continue;
         }
         res.status(503).json({ error: cleanGeminiError(err) });
@@ -140,6 +151,7 @@ export function createApiApp() {
       if (!ai) {
         return res.status(503).json({ error: "Gemini API key not configured on server" });
       }
+      const deadline = Date.now() + REQUEST_DEADLINE_MS;
       const response = await withRetry(() => ai.models.generateContent({
         model: "gemini-3.8-flash",
         contents: [{ parts: [{ text: `You are a strict, realistic ATS (Applicant Tracking System) analyzer. Give an honest assessment — do not inflate the score to be encouraging. A CV that is a poor match for the job description MUST score low (below 50). A CV with no real overlap in role, skills, or seniority should score below 30.
@@ -164,7 +176,7 @@ ${jobDescription}` }] }],
         config: {
           responseMimeType: "application/json"
         }
-      }));
+      }), deadline);
       const parsed = JSON.parse(response.text || "{}");
       res.json(parsed);
     } catch (err: any) {
@@ -181,11 +193,12 @@ ${jobDescription}` }] }],
       if (!ai) {
         return res.status(503).json({ error: "Gemini API key not configured on server" });
       }
+      const deadline = Date.now() + REQUEST_DEADLINE_MS;
       const response = await withRetry(() => ai.models.generateContent({
         model: "gemini-3.8-flash",
         contents: [{ parts: [{ text: `Parse this CV text into a JSON object with these fields: name, email, phone, country, city, linkedin, portfolio, background (a career summary), achievements (array of strings or a single string), skills (array of strings), educations (array of {degree, university}), workExperiences (array of {company, title, startDate, endDate, current, responsibilities (string with bullet points or paragraphs)}), certificates (array of strings), courses (array of strings). Only include information actually present in the text — leave a field empty or omit it rather than inventing data. Ensure all extracted text has perfect grammar and spelling. Return ONLY the JSON object.\n\nCV TEXT:\n${text}` }] }],
         config: { responseMimeType: "application/json" }
-      }));
+      }), deadline);
       const parsed = JSON.parse(response.text || "{}");
       res.json({ profile: parsed });
     } catch (err: any) {
@@ -202,6 +215,7 @@ ${jobDescription}` }] }],
       if (!ai) {
         return res.status(503).json({ error: "Gemini API key not configured on server" });
       }
+      const deadline = Date.now() + REQUEST_DEADLINE_MS;
       const response = await withRetry(() => ai.models.generateContent({
         model: "gemini-3.8-flash",
         contents: [{
@@ -210,7 +224,7 @@ ${jobDescription}` }] }],
             { text: "Extract all text from this document. Return only the extracted text, no commentary or markdown formatting." }
           ]
         }]
-      }));
+      }), deadline);
       res.json({ text: response.text || "" });
     } catch (err: any) {
       console.error("Server extract-pdf error:", err?.message || err);
@@ -226,13 +240,14 @@ ${jobDescription}` }] }],
       if (!ai) {
         return res.status(503).json({ error: "Gemini API key not configured on server" });
       }
+      const deadline = Date.now() + REQUEST_DEADLINE_MS;
       const response = await withRetry(() => ai.models.generateContent({
         model: "gemini-3.8-flash",
         contents: `Extract the job title, company name, and full job description (responsibilities, requirements, skills) from this URL: ${url}. If the page cannot be accessed or does not contain a job posting, say so plainly instead of inventing content.`,
         config: {
           tools: [{ urlContext: {} }]
         }
-      }));
+      }), deadline);
       res.json({ text: response.text || "" });
     } catch (err: any) {
       console.error("Server extract-url error:", err?.message || err);
@@ -248,6 +263,7 @@ ${jobDescription}` }] }],
       if (!ai) {
         return res.status(503).json({ error: "Gemini API key not configured on server" });
       }
+      const deadline = Date.now() + REQUEST_DEADLINE_MS;
       const response = await withRetry(() => ai.models.generateContent({
         model: "gemini-3.8-flash",
         contents: `Extract all professional information from this LinkedIn profile URL: ${url}. Parse it into a JSON object with these fields: name, email, phone, country, city, linkedin, portfolio, background (a career summary), achievements (array of strings), skills (array of strings), educations (array of {degree, university}), workExperiences (array of {company, title, startDate, endDate, current, responsibilities (string with bullet points or paragraphs)}), certificates (array of strings), courses (array of strings). Only include information actually present on the page — leave fields empty rather than inventing data. Return ONLY the JSON object, no markdown blocks.`,
@@ -255,7 +271,7 @@ ${jobDescription}` }] }],
           tools: [{ urlContext: {} }],
           responseMimeType: "application/json"
         }
-      }));
+      }), deadline);
       const parsed = JSON.parse(response.text || "{}");
       res.json({ profile: parsed });
     } catch (err: any) {
