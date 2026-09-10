@@ -127,7 +127,7 @@ export function createApiApp() {
       attempt++;
       try {
         const stream = await withAttemptTimeout(ai.models.generateContentStream({
-          model: "gemini-3.8-flash",
+          model: "gemini-3.6-flash",
           contents: [{ parts: [{ text: content }] }],
           config: { systemInstruction, temperature: 0.7 }
         }));
@@ -174,7 +174,7 @@ export function createApiApp() {
       }
       const deadline = Date.now() + REQUEST_DEADLINE_MS;
       const response = await withRetry(() => ai.models.generateContent({
-        model: "gemini-3.8-flash",
+        model: "gemini-3.6-flash",
         contents: [{ parts: [{ text: `You are a strict, realistic ATS (Applicant Tracking System) analyzer. Give an honest assessment — do not inflate the score to be encouraging. A CV that is a poor match for the job description MUST score low (below 50). A CV with no real overlap in role, skills, or seniority should score below 30.
 Compare the following CV against the provided Job Description.
 Calculate a match score out of 100 based on keyword matches, required skills coverage, seniority alignment, and formatting.
@@ -216,7 +216,7 @@ ${jobDescription}` }] }],
       }
       const deadline = Date.now() + REQUEST_DEADLINE_MS;
       const response = await withRetry(() => ai.models.generateContent({
-        model: "gemini-3.8-flash",
+        model: "gemini-3.6-flash",
         contents: [{ parts: [{ text: `Parse this CV text into a JSON object with these fields: name, email, phone, country, city, linkedin, portfolio, background (a career summary), achievements (array of strings or a single string), skills (array of strings), educations (array of {degree, university}), workExperiences (array of {company, title, startDate, endDate, current, responsibilities (string with bullet points or paragraphs)}), certificates (array of strings), courses (array of strings). Only include information actually present in the text — leave a field empty or omit it rather than inventing data. Ensure all extracted text has perfect grammar and spelling. Return ONLY the JSON object.\n\nCV TEXT:\n${text}` }] }],
         config: { responseMimeType: "application/json" }
       }), deadline);
@@ -238,7 +238,7 @@ ${jobDescription}` }] }],
       }
       const deadline = Date.now() + REQUEST_DEADLINE_MS;
       const response = await withRetry(() => ai.models.generateContent({
-        model: "gemini-3.8-flash",
+        model: "gemini-3.6-flash",
         contents: [{
           parts: [
             { inlineData: { data: base64, mimeType: mimeType || "application/pdf" } },
@@ -263,7 +263,7 @@ ${jobDescription}` }] }],
       }
       const deadline = Date.now() + REQUEST_DEADLINE_MS;
       const response = await withRetry(() => ai.models.generateContent({
-        model: "gemini-3.8-flash",
+        model: "gemini-3.6-flash",
         contents: `Extract the job title, company name, and full job description (responsibilities, requirements, skills) from this URL: ${url}. If the page cannot be accessed or does not contain a job posting, say so plainly instead of inventing content.`,
         config: {
           tools: [{ urlContext: {} }]
@@ -286,7 +286,7 @@ ${jobDescription}` }] }],
       }
       const deadline = Date.now() + REQUEST_DEADLINE_MS;
       const response = await withRetry(() => ai.models.generateContent({
-        model: "gemini-3.8-flash",
+        model: "gemini-3.6-flash",
         contents: `Extract all professional information from this LinkedIn profile URL: ${url}. Parse it into a JSON object with these fields: name, email, phone, country, city, linkedin, portfolio, background (a career summary), achievements (array of strings), skills (array of strings), educations (array of {degree, university}), workExperiences (array of {company, title, startDate, endDate, current, responsibilities (string with bullet points or paragraphs)}), certificates (array of strings), courses (array of strings). Only include information actually present on the page — leave fields empty rather than inventing data. Return ONLY the JSON object, no markdown blocks.`,
         config: {
           tools: [{ urlContext: {} }],
