@@ -28,7 +28,7 @@ function cleanGeminiError(err: any): string {
 
 function isTransientGeminiError(err: any): boolean {
   const raw = String(err?.message || err);
-  return /"code":\s*503|"code":\s*429|UNAVAILABLE|RESOURCE_EXHAUSTED|overloaded|high demand/i.test(raw);
+  return /"code":\s*503|"code":\s*429|UNAVAILABLE|RESOURCE_EXHAUSTED|overloaded|high demand|timed out/i.test(raw);
 }
 
 // The Vercel function has a hard maxDuration; leave a safety margin so our
@@ -36,15 +36,30 @@ function isTransientGeminiError(err: any): boolean {
 // function and the user sees a bare, unhelpful platform timeout instead.
 const REQUEST_DEADLINE_MS = 50_000;
 
-// Retries a Gemini call for transient "model overloaded" style errors — not
-// for real failures like an invalid API key or a malformed request. Stops
-// retrying (rather than blindly trying again) once there's no longer enough
-// time left in the request's budget for another attempt.
-async function withRetry<T>(fn: () => Promise<T>, deadline: number, attempts = 3): Promise<T> {
+// A single Gemini call can occasionally hang far longer than a normal
+// response without ever throwing — this bounds how long any one attempt is
+// allowed to take, so a stuck call doesn't just sit there until Vercel's
+// hard kill fires. Racing a promise doesn't cancel the underlying request,
+// but it lets us give up and respond to the client promptly either way.
+const ATTEMPT_TIMEOUT_MS = 20_000;
+function withAttemptTimeout<T>(promise: Promise<T>): Promise<T> {
+  return Promise.race([
+    promise,
+    sleep(ATTEMPT_TIMEOUT_MS).then((): never => {
+      throw new Error("The AI model took too long to respond (timed out).");
+    })
+  ]);
+}
+
+// Retries a Gemini call for transient "model overloaded" / timeout style
+// errors — not for real failures like an invalid API key or a malformed
+// request. Stops retrying (rather than blindly trying again) once there's no
+// longer enough time left in the request's budget for another attempt.
+async function withRetry<T>(fn: () => Promise<T>, deadline: number, attempts = 2): Promise<T> {
   let lastErr: any;
   for (let i = 0; i < attempts; i++) {
     try {
-      return await fn();
+      return await withAttemptTimeout(fn());
     } catch (err) {
       lastErr = err;
       const backoff = 500 * Math.pow(2, i); // 500ms, 1000ms, ...
@@ -107,20 +122,26 @@ export function createApiApp() {
 
     const deadline = Date.now() + REQUEST_DEADLINE_MS;
     let attempt = 0;
-    const maxAttempts = 3;
+    const maxAttempts = 2;
     while (attempt < maxAttempts) {
       attempt++;
       try {
-        const stream = await ai.models.generateContentStream({
+        const stream = await withAttemptTimeout(ai.models.generateContentStream({
           model: "gemini-3.8-flash",
           contents: [{ parts: [{ text: content }] }],
           config: { systemInstruction, temperature: 0.7 }
-        });
+        }));
 
         res.setHeader("Content-Type", "text/plain; charset=utf-8");
         res.setHeader("Cache-Control", "no-cache");
-        for await (const chunk of stream) {
-          const t = chunk.text;
+        // Iterate manually (rather than a plain `for await`) so each individual
+        // chunk wait is also bounded — a stream that starts but then stalls
+        // shouldn't hang any longer than one that never starts at all.
+        const iterator = stream[Symbol.asyncIterator]();
+        while (true) {
+          const { value, done } = await withAttemptTimeout(iterator.next());
+          if (done) break;
+          const t = value.text;
           if (t) res.write(t);
         }
         res.end();
